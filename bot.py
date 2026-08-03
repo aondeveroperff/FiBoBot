@@ -3,17 +3,6 @@ bot.py
 ------
 Telegram Trading Scanner Bot
 สำหรับ Deploy บน Render.com (Web Service - Free Plan)
-
-คุณสมบัติหลัก:
-  * เปิด Dummy HTTP Health Check Server ผูกกับ PORT ของ Render ก่อนรัน Bot Polling
-    (ป้องกัน Render ตัดการทำงานเพราะไม่มี Port ให้ bind)
-  * รับคำสั่ง /start และ /scan <SYMBOL>
-  * ดึงราคาแท่งเทียน H1:
-      - Crypto (ลงท้ายด้วย USDT)  -> Binance Public API
-      - Forex / Gold (เช่น XAUUSD, EURUSD) -> Yahoo Finance Chart API
-  * ส่งข้อมูลเข้า TumniScanner เพื่อหาสัญญาณ WAIT_BUY / CONFIRMED
-  * Guard Check: ถ้าราคาปัจจุบันหลุด Stop Loss (KRH1) แล้ว ให้ตอบว่าไม่พบสัญญาณ
-  * (ทางเลือก) กรองด้วย AI Confidence ถ้ามีไฟล์โมเดล .pkl วางไว้ในโปรเจกต์
 """
 
 from __future__ import annotations
@@ -64,21 +53,18 @@ if not TELEGRAM_BOT_TOKEN:
         "ไม่พบ TELEGRAM_BOT_TOKEN ใน Environment Variables — "
         "กรุณาตั้งค่าใน Render Dashboard > Environment ก่อนรัน"
     )
-    # ไม่ sys.exit ทันที เพราะยังต้องการให้ Health Check Server ขึ้นมาก่อน
-    # เพื่อให้ Render เห็น service ว่ายัง alive และแสดง log ให้ผู้ใช้เห็นสาเหตุ
 
 # --------------------------------------------------------------------------- #
-# 1) Dummy HTTP Health Check Server (ต้อง bind PORT ให้เร็วที่สุด)
+# 1) Dummy HTTP Health Check Server
 # --------------------------------------------------------------------------- #
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):  # noqa: N802 (ชื่อ method ตาม BaseHTTPRequestHandler)
+    def do_GET(self):  # noqa: N802
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"Tumni Trading Scanner Bot is running.")
 
     def log_message(self, format, *args):  # noqa: A002
-        # ปิด access log ของ http.server ไม่ให้ท่วม console log ของ Render
         pass
 
 
@@ -100,9 +86,11 @@ def run_health_server_in_background(port: int) -> threading.Thread:
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 YAHOO_CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
 
+# 🔥 จุดที่แก้ไข: กำหนดให้ XAUUSD และ GOLD ดึงจาก GC=F (Gold Futures)
 YAHOO_ALIASES = {
-    "XAUUSD": "XAUUSD=X",
-    "XAGUSD": "XAGUSD=X",
+    "XAUUSD": "GC=F",
+    "GOLD": "GC=F",
+    "XAGUSD": "SI=F",
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
@@ -129,7 +117,6 @@ def is_crypto_symbol(symbol: str) -> bool:
 
 
 def fetch_binance_klines(symbol: str, interval: str = "1h", limit: int = 150) -> pd.DataFrame:
-    """ดึง K-line จาก Binance Public API โดยตรง (ไม่ผ่าน yfinance เพื่อกัน Rate Limit)"""
     params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
     try:
         resp = requests.get(BINANCE_KLINES_URL, params=params, timeout=HTTP_TIMEOUT_SECONDS)
@@ -158,8 +145,16 @@ def fetch_binance_klines(symbol: str, interval: str = "1h", limit: int = 150) ->
 
 
 def fetch_yahoo_chart(symbol: str, interval: str = "60m", range_: str = "1mo") -> pd.DataFrame:
-    """ดึงข้อมูลแท่งเทียนจาก Yahoo Finance Chart API โดยตรง พร้อม User-Agent Header"""
-    yahoo_symbol = YAHOO_ALIASES.get(symbol.upper(), symbol.upper())
+    symbol_clean = symbol.upper().strip()
+    
+    # ดึงสัญลักษณ์จาก Alias ก่อน ถ้าไม่มีค่อยเติม =X
+    if symbol_clean in YAHOO_ALIASES:
+        yahoo_symbol = YAHOO_ALIASES[symbol_clean]
+    elif not symbol_clean.endswith("=X"):
+        yahoo_symbol = f"{symbol_clean}=X"
+    else:
+        yahoo_symbol = symbol_clean
+
     url = YAHOO_CHART_URL.format(symbol=yahoo_symbol)
     params = {"interval": interval, "range": range_, "includePrePost": "false"}
 
@@ -170,7 +165,7 @@ def fetch_yahoo_chart(symbol: str, interval: str = "60m", range_: str = "1mo") -
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as exc:
-        raise DataFetchError(f"เรียก Yahoo Finance API ไม่สำเร็จ: {exc}") from exc
+        raise DataFetchError(f"เรียก Yahoo Finance API ไม่สำเร็จ ({yahoo_symbol}): {exc}") from exc
 
     try:
         result = data["chart"]["result"][0]
@@ -203,7 +198,6 @@ def fetch_yahoo_chart(symbol: str, interval: str = "60m", range_: str = "1mo") -
 
 
 def fetch_h1_candles(symbol: str) -> pd.DataFrame:
-    """เลือกแหล่งข้อมูลตามประเภทสัญลักษณ์ (Crypto -> Binance, Forex/Gold -> Yahoo)"""
     symbol = symbol.upper().strip()
     if is_crypto_symbol(symbol):
         return fetch_binance_klines(symbol, interval="1h", limit=150)
@@ -211,7 +205,7 @@ def fetch_h1_candles(symbol: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-# 3) AI Confidence Filter (ทางเลือก — โหลดเฉพาะเมื่อมีไฟล์โมเดลอยู่จริง)
+# 3) AI Confidence Filter
 # --------------------------------------------------------------------------- #
 _ai_model = None
 _ai_scaler = None
@@ -229,7 +223,7 @@ def _try_load_ai_model() -> None:
         return
 
     try:
-        import joblib  # นำเข้าแบบ lazy เพื่อไม่ให้ import ล้มเหลวถ้าไม่ได้ใช้ AI
+        import joblib
 
         _ai_model = joblib.load(AI_MODEL_PATH)
         if os.path.exists(AI_SCALER_PATH):
@@ -242,13 +236,6 @@ def _try_load_ai_model() -> None:
 
 
 def compute_ai_confidence(df: pd.DataFrame, result: ScanResult) -> Optional[float]:
-    """
-    คำนวณ Confidence Score จากโมเดล AI (ถ้ามี)
-    คืนค่า None หากไม่มีโมเดลให้ใช้งาน (จะไม่ถูกนำไปกรองสัญญาณ)
-
-    หมายเหตุ: ฟีเจอร์ตัวอย่างด้านล่างเป็นค่าเริ่มต้นแบบทั่วไป
-    ผู้ใช้ควรปรับให้ตรงกับฟีเจอร์ที่โมเดลของตนเองถูกเทรนมาจริง
-    """
     _try_load_ai_model()
     if _ai_model is None:
         return None
@@ -336,7 +323,6 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    # ----- Guard: กรองเฉพาะ WAIT_BUY / CONFIRMED เท่านั้น -----
     if result.signal not in ("WAIT_BUY", "CONFIRMED"):
         reason = result.reason or "ไม่พบเงื่อนไขสัญญาณที่ตรงตามเกณฑ์"
         await processing_msg.edit_text(
@@ -345,7 +331,6 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    # ----- AI Confidence Filter (ทางเลือก) -----
     confidence = compute_ai_confidence(df, result)
     if confidence is not None and confidence < AI_CONFIDENCE_THRESHOLD:
         await processing_msg.edit_text(
@@ -396,7 +381,6 @@ def build_application() -> Application:
 
 
 def main() -> None:
-    # 1) เปิด Health Check Server ก่อนเสมอ เพื่อให้ Render เห็นว่า port ถูก bind แล้ว
     run_health_server_in_background(PORT)
 
     if not TELEGRAM_BOT_TOKEN:
@@ -404,7 +388,6 @@ def main() -> None:
             "หยุดการทำงานของ Telegram Bot เนื่องจากไม่มี TELEGRAM_BOT_TOKEN "
             "(Health Check Server ยังคงทำงานต่อไปเพื่อไม่ให้ Render mark เป็น failed)"
         )
-        # ปล่อยให้ thread หลักค้างไว้เฉยๆ เพื่อให้ Health Check Server ยังตอบ 200 ได้
         threading.Event().wait()
         return
 
