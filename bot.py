@@ -223,42 +223,45 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------------------------------------------------------
 # 6. Main Application Entry Point
 # ---------------------------------------------------------
+import os
+import asyncio
 import uvicorn
-from fastapi import FastAPI, Request
-from telegram import Update
+from fastapi import FastAPI
 from telegram.ext import ApplicationBuilder, CommandHandler
 
-# ... (โค้ดส่วนดึงข้อมูลราคาเหมือนเดิม) ...
+# ... (โค้ดดึงข้อมูลราคาและคำนวณด้านบนเหมือนเดิมทั้งหมด) ...
 
-# สร้าง FastAPI app เพื่อ Bind Port ให้ Render
-api_app = FastAPI()
-telegram_app = None
+# สร้าง FastAPI server เล็กๆ เพื่อเปิด Port ให้ Render สแกนผ่าน (ใช้ฟรีได้ตลอด)
+app_web = FastAPI()
 
-@api_app.get("/")
-async def health_check():
-    return {"status": "ok", "message": "Bot is running"}
+@app_web.get("/")
+def health_check():
+    return {"status": "ok", "bot": "running"}
 
-@api_app.post("/webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"status": "ok"}
+async def run_bot_and_web():
+    # 1. ตั้งค่าและสั่งบอท Telegram ทำงาน (Polling)
+    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("scan", scan_command))
+    
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
+
+    # 2. เปิด Web Server บน Port ที่ Render กำหนด
+    port = int(os.environ.get("PORT", 10000))
+    config = uvicorn.Config(app=app_web, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    
+    logger.info(f"เริ่มต้นเปิด Web Server บน Port {port}...")
+    await server.serve()
 
 def main():
-    global telegram_app
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         logger.error("โปรดตั้งค่า TELEGRAM_BOT_TOKEN ใน Environment Variables")
         return
 
-    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("scan", scan_command))
-
-    # ดึง PORT จาก Render (ถ้าไม่มีจะใช้ 10000)
-    port = int(os.environ.get("PORT", 10000))
-    
-    # รัน Web Server
-    uvicorn.run(api_app, host="0.0.0.0", port=port)
+    # รันทั้งสองระบบพร้อมกันใน Async Event Loop
+    asyncio.run(run_bot_and_web())
 
 if __name__ == "__main__":
     main()
