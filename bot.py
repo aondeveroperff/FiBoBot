@@ -88,9 +88,9 @@ YAHOO_CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 # 🔥 จุดที่แก้ไข: กำหนดให้ XAUUSD และ GOLD ดึงจาก GC=F (Gold Futures)
 YAHOO_ALIASES = {
-    "XAUUSD": "GC=F",
-    "GOLD": "GC=F",
-    "XAGUSD": "SI=F",
+    "XAUUSD": "XAUUSD=X",
+    "GOLD": "XAUUSD=X",
+    "XAGUSD": "XAGUSD=X",
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
