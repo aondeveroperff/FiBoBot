@@ -346,23 +346,37 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await processing_msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
 
 
+import zoneinfo # เพิ่มไว้ด้านบนสุดของไฟล์ถ้ายังไม่มี
+
 def format_signal_reply(result: ScanResult, confidence: Optional[float]) -> str:
+    # แปลงเวลาเป็นเวลาประเทศไทย (UTC+7)
+    tz_th = zoneinfo.ZoneInfo("Asia/Bangkok")
+    
+    pattern_time_str = str(result.pattern_time)
+    current_time_str = str(result.current_time)
+    
+    if isinstance(result.pattern_time, datetime):
+        pattern_time_str = result.pattern_time.astimezone(tz_th).strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(result.current_time, datetime):
+        current_time_str = result.current_time.astimezone(tz_th).strftime("%Y-%m-%d %H:%M:%S")
+
     lines = [
         f"*{result.symbol}*",
         f"สถานะ: `{result.signal}`",
         "",
-        f"เวลาแท่งสัญญาณ: `{result.pattern_time}`",
-        f"เวลาราคาล่าสุด: `{result.current_time}`",
-        f"ราคาปัจจุบัน: `{result.current_price:.5f}`",
+        f"เวลาแท่งสัญญาณ: `{pattern_time_str}` (ไทย)",
+        f"เวลาราคาล่าสุด: `{current_time_str}` (ไทย)",
+        f"ราคาปัจจุบัน: `{result.current_price:.2f}`",
         "",
-        f"Entry (KRH2): `{result.KRH2:.5f}`",
-        f"Stop Loss (KRH1): `{result.KRH1:.5f}`",
-        f"Take Profit (RUN): `{result.RUN:.5f}`",
+        f"Entry (KRH2): `{result.KRH2:.2f}`",
+        f"Stop Loss (KRH1): `{result.KRH1:.2f}`",
+        f"Take Profit (RUN): `{result.RUN:.2f}`",
     ]
     if confidence is not None:
         lines.append("")
         lines.append(f"AI Confidence: `{confidence:.2%}`")
     return "\n".join(lines)
+
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
