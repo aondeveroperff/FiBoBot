@@ -223,16 +223,42 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------------------------------------------------------
 # 6. Main Application Entry Point
 # ---------------------------------------------------------
+import uvicorn
+from fastapi import FastAPI, Request
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler
+
+# ... (โค้ดส่วนดึงข้อมูลราคาเหมือนเดิม) ...
+
+# สร้าง FastAPI app เพื่อ Bind Port ให้ Render
+api_app = FastAPI()
+telegram_app = None
+
+@api_app.get("/")
+async def health_check():
+    return {"status": "ok", "message": "Bot is running"}
+
+@api_app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"status": "ok"}
+
 def main():
+    global telegram_app
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         logger.error("โปรดตั้งค่า TELEGRAM_BOT_TOKEN ใน Environment Variables")
         return
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("scan", scan_command))
+    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("scan", scan_command))
 
-    logger.info("บอทเริ่มทำงานเรียบร้อยแล้ว...")
-    app.run_polling()
+    # ดึง PORT จาก Render (ถ้าไม่มีจะใช้ 10000)
+    port = int(os.environ.get("PORT", 10000))
+    
+    # รัน Web Server
+    uvicorn.run(api_app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
